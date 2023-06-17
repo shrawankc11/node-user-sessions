@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const Router = require('router');
 const bodyParser = require('body-parser');
 const { Pool } = require('pg');
+const { createClient } = require('redis');
 const keys = require('./secret.json');
 
 const pool = new Pool({
@@ -16,16 +17,20 @@ const pool = new Pool({
     connectionTimeoutMillis: 2000,
 });
 
+/**
+ * redis will act as our session store ---->
+ */
+const sessionStore = createClient().on('error', console.error);
+
+sessionStore.connect().then(() => console.log('done!'));
+
 const opts = { mergeParams: true };
-let sessionStore = [],
-    res;
 
 function getCookie(req) {
     return req.rawHeaders[req.rawHeaders.indexOf('Cookie') + 1].split('=')[1];
 }
 
 function errorHandler(res, error = new Error('server error!')) {
-    console.log(error.message);
     res.statusCode = 500;
     res.end(error.message);
 }
@@ -41,12 +46,12 @@ async function main() {
         res.end('home page!');
     });
 
-    page.get('/your-page', (req, res) => {
+    page.get('/your-page', async (req, res) => {
         const ssid = getCookie(req);
 
-        const user = sessionStore.find((s) => s.ssid === ssid);
+        const userSession = JSON.parse(await sessionStore.get(ssid));
 
-        if (!user) {
+        if (!userSession) {
             res.statusCode = 401;
             return res.end(
                 'only logged in user can view their personalized page!'
@@ -54,7 +59,7 @@ async function main() {
         }
 
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.end(`<h1>Your role is: ${user.role}</h1>`);
+        res.end(`<h1>Your role is: ${userSession.role}</h1>`);
     });
 
     user.post('/register', async (req, res) => {
@@ -77,10 +82,14 @@ async function main() {
         res.end('user created!');
     });
 
-    user.post('/logout', (req, res) => {
+    user.post('/logout', async (req, res) => {
         const ssid = getCookie(req);
 
-        sessionStore = sessionStore.filter((u) => u.ssid !== ssid);
+        /**
+         * just clear the session store once user logs out
+         * no need to clear cookies
+         */
+        await sessionStore.del(ssid);
 
         res.end('logged out!');
     });
@@ -98,11 +107,13 @@ async function main() {
         if (user && user.password === password) {
             const sessionId = crypto.randomBytes(64).toString('hex');
 
-            sessionStore.push({
+            const userSessionObject = {
                 ssid: sessionId,
                 role: user.role,
                 id: user.user_id,
-            });
+            };
+
+            sessionStore.set(sessionId, JSON.stringify(userSessionObject));
 
             res.setHeader(
                 'Set-Cookie',
@@ -120,12 +131,10 @@ async function main() {
         res.end('unknwon endpoint');
     });
 
-    return http
-        .createServer(function (req, res) {
-            console.log(req.url + '\n', req.rawHeaders);
-            api(req, res, function (req, res) {});
-        })
-        .on('error', (err) => {});
+    return http.createServer(function (req, res) {
+        console.log(req.url + '\n', req.rawHeaders);
+        api(req, res, function (req, res) {});
+    });
 }
 
 main()
