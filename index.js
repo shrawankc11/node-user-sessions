@@ -2,19 +2,38 @@ const http = require('http');
 const crypto = require('crypto');
 const Router = require('router');
 const bodyParser = require('body-parser');
+const { Pool } = require('pg');
+const keys = require('./secret.json');
+
+const pool = new Pool({
+    host: 'localhost',
+    user: keys.username,
+    database: 'sessions',
+    password: keys.password,
+    port: 5555,
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+});
 
 const opts = { mergeParams: true };
-const users = [];
-let sessionStore = [];
+let sessionStore = [],
+    res;
 
 function getCookie(req) {
     return req.rawHeaders[req.rawHeaders.indexOf('Cookie') + 1].split('=')[1];
 }
 
+function errorHandler(res, error = new Error('server error!')) {
+    console.log(error.message);
+    res.statusCode = 500;
+    res.end(error.message);
+}
+
 async function main() {
     const page = Router();
     const user = Router(opts);
-    const main = Router(opts).use(page).use(user);
+    const api = Router(opts).use(page).use(user);
 
     user.use(bodyParser.json());
 
@@ -38,16 +57,23 @@ async function main() {
         res.end(`<h1>Your role is: ${user.role}</h1>`);
     });
 
-    user.post('/register', (req, res) => {
+    user.post('/register', async (req, res) => {
         const { username, password, role } = req.body;
 
-        const user = users.find((u) => u.username === username);
+        const result = await pool.query(
+            'SELECT COUNT(*) FROM users where username=$1',
+            [username]
+        );
 
-        if (user) {
+        if (result.rows[0].count === '1') {
             return res.end('user already exists!');
         }
 
-        users.push({ username, password, role });
+        await pool.query(
+            'INSERT INTO users(username, password, role) values ($1, $2, $3)',
+            [username, password, role]
+        );
+
         res.end('user created!');
     });
 
@@ -59,15 +85,24 @@ async function main() {
         res.end('logged out!');
     });
 
-    user.post('/login', (req, res) => {
+    user.post('/login', async (req, res) => {
         const { username, password } = req.body;
 
-        const user = users.find((u) => u.username === username);
+        const {
+            rows: [user],
+        } = await pool.query(
+            'SELECT password, user_id, role FROM users where username=$1',
+            [username]
+        );
 
         if (user && user.password === password) {
             const sessionId = crypto.randomBytes(64).toString('hex');
 
-            sessionStore.push({ ssid: sessionId, role: user.role });
+            sessionStore.push({
+                ssid: sessionId,
+                role: user.role,
+                id: user.user_id,
+            });
 
             res.setHeader(
                 'Set-Cookie',
@@ -80,16 +115,17 @@ async function main() {
         }
     });
 
-    main.use((req, res) => {
+    api.use((req, res) => {
         res.statusCode = 404;
         res.end('unknwon endpoint');
     });
 
-    return http.createServer(function (req, res) {
-        console.log(req.url + '\n', req.rawHeaders);
-        console.log(sessionStore);
-        main(req, res, function (req, res) {});
-    });
+    return http
+        .createServer(function (req, res) {
+            console.log(req.url + '\n', req.rawHeaders);
+            api(req, res, function (req, res) {});
+        })
+        .on('error', (err) => {});
 }
 
 main()
